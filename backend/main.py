@@ -23,6 +23,7 @@ def resolve(relative: str) -> Path:
         raise HTTPException(400, "Invalid path")
     return fp
 
+
 def meta(path: Path) -> dict:
     stat = path.stat()
     return {
@@ -31,6 +32,14 @@ def meta(path: Path) -> dict:
         "modified": stat.st_mtime,
         "size": stat.st_size,
     }
+
+
+async def broadcast(room: str, data: bytes, exclude: WebSocket) -> None:
+    for ws in list(_rooms.get(room, set())):
+        if ws is not exclude:
+            try:
+                await ws.send_bytes(data)
+            except Exception:
 
 
 @app.get("/api/files")
@@ -70,6 +79,24 @@ async def delete_file(path: str):
     if not fp.is_file():
         raise HTTPException(404, "File not found")
     fp.unlink()
+
+
+@app.websocket("/ws/files/{path:path}")
+async def relay(ws: WebSocket, path: str):
+    resolve(path)
+    await ws.accept()
+    _rooms.setdefault(path, set()).add(ws)
+    log.info("connect %s peers=%d", path, len(_rooms.get(path, set())))
+    try:
+        while True:
+            await broadcast(path, await ws.receive_bytes(), exclude=ws)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _rooms[path].discard(ws)
+        if not _rooms[path]:
+            del _rooms[path]
+        log.info("disconnect %s peers=%d", path, len(_rooms.get(path, set())))
 
 
 @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
