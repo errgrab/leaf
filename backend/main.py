@@ -40,6 +40,7 @@ async def broadcast(room: str, data: bytes, exclude: WebSocket) -> None:
             try:
                 await ws.send_bytes(data)
             except Exception:
+                _rooms[room].discard(ws)
 
 
 @app.get("/api/files")
