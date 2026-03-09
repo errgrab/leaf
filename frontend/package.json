@@ -19,8 +19,14 @@
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/language": "^6.12.2",
     "@codemirror/language-data": "^6.5.2",
+    "@codemirror/state": "^6.5.4",
     "@codemirror/view": "^6.39.16",
     "@lezer/highlight": "^1.2.3",
-    "codemirror": "^6.0.2"
+    "codemirror": "^6.0.2",
+    "lib0": "^0.2.117",
+    "y-codemirror.next": "^0.3.5",
+    "y-indexeddb": "^9.0.12",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.29"
   }
 }

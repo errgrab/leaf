@@ -5,11 +5,8 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
     proxy: {
-      "/api": {
-        target: "http://backend:8000",
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, "/api"),
-      },
+      "/api": { target: "http://backend:8000" },
+      "/ws": { target: "ws://backend:8000", ws: true },
     },
   },
 });

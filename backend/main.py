@@ -2,7 +2,14 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Body,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, HTMLResponse
 
 BASE_DIR = Path("/data")
@@ -14,6 +21,7 @@ log = logging.getLogger(__name__)
 _rooms: dict[str, set[WebSocket]] = {}
 
 app = FastAPI()
+
 
 def resolve(relative: str) -> Path:
     if ".." in Path(relative).parts:
@@ -75,7 +83,7 @@ async def move_file(path: str, new_path: str = Body(..., embed=True)):
 
 
 @app.delete("/api/files/{path:path}", status_code=204)
-async def delete_file(path: str):
+def delete_file(path: str):
     fp = resolve(path)
     if not fp.is_file():
         raise HTTPException(404, "File not found")
@@ -104,5 +112,5 @@ async def relay(ws: WebSocket, path: str):
 def spa(path: str):
     index_path = Path("../frontend/dist/index.html")
     if not index_path.exists():
-        return "Frontend build not found. Please build the frontend first."
+        raise HTTPException(503, "Frontend not built")
     return FileResponse(index_path)
