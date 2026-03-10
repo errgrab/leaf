@@ -9,4 +9,9 @@ export default defineConfig({
       "/ws": { target: "ws://backend:8000", ws: true },
     },
   },
+  build: {
+    // Copy public assets to dist root
+    emptyOutDir: true,
+  },
+  publicDir: "public",
 });

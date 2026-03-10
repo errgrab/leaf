@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -11,8 +12,10 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
-BASE_DIR = Path("/data")
+# Data directory - configurable via environment variable
+BASE_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -21,6 +24,16 @@ log = logging.getLogger(__name__)
 _rooms: dict[str, set[WebSocket]] = {}
 
 app = FastAPI()
+
+# Static file directory for production build
+STATIC_DIR = Path("./static") if Path("./static").exists() else Path("../frontend/dist")
+STATIC_DIR_AVAILABLE = STATIC_DIR.exists()
+
+# Mount static files at /assets (this takes precedence over catch-all routes)
+if STATIC_DIR_AVAILABLE and (STATIC_DIR / "assets").exists():
+    app.mount(
+        "/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets"
+    )
 
 
 def resolve(relative: str) -> Path:
@@ -110,8 +123,17 @@ async def relay(ws: WebSocket, path: str):
 
 @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
 def spa(path: str):
-    # Try multiple locations for production and development
-    for index_path in [Path("./static/index.html"), Path("../frontend/dist/index.html")]:
-        if index_path.exists():
-            return FileResponse(index_path)
-    raise HTTPException(503, "Frontend not built")
+    """Serve static files if they exist, otherwise serve index.html for SPA."""
+    if not STATIC_DIR_AVAILABLE:
+        raise HTTPException(503, "Frontend not built")
+
+    # Try to serve the file directly if it exists (e.g., leaf.svg)
+    file_path = STATIC_DIR / path
+    if file_path.exists() and file_path.is_file():
+        return FileResponse(file_path)
+
+    # Fall back to index.html for SPA routing
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(503, "Frontend not built")
+    return FileResponse(index_path)

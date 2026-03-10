@@ -11,6 +11,7 @@ services:
       - ./data:/data
     environment:
       - PYTHONUNBUFFERED=1
+      - DATA_DIR=/data
     restart: unless-stopped
 
   # Frontend - Vite dev server with hot-reload
