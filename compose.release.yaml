@@ -1,0 +1,13 @@
+services:
+  # Single production service - backend serves frontend
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

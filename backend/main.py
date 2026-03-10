@@ -110,7 +110,8 @@ async def relay(ws: WebSocket, path: str):
 
 @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
 def spa(path: str):
-    index_path = Path("../frontend/dist/index.html")
-    if not index_path.exists():
-        raise HTTPException(503, "Frontend not built")
-    return FileResponse(index_path)
+    # Try multiple locations for production and development
+    for index_path in [Path("./static/index.html"), Path("../frontend/dist/index.html")]:
+        if index_path.exists():
+            return FileResponse(index_path)
+    raise HTTPException(503, "Frontend not built")
