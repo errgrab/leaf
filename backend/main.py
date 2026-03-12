@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import os
 import shutil
+import struct
 from pathlib import Path
 
 from fastapi import (
@@ -14,26 +16,91 @@ from fastapi import (
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-# Data directory - configurable via environment variable
 BASE_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-_rooms: dict[str, set[WebSocket]] = {}
+# ─── Room ────────────────────────────────────────────────────────────────────
+
+class Room:
+    """
+    Holds the state for one note.
+
+    Updates are stored as a list of raw WebSocket message bytes — exactly as
+    received from clients, exactly as replayed to new peers. The server never
+    inspects or reframes the content.
+
+    Persisted to disk as a simple binary format:
+        [4-byte big-endian length][message bytes] repeated
+    """
+
+    def __init__(self, path: str):
+        self.path        = path
+        self.peers: set[WebSocket] = set()
+        self.updates: list[bytes] = []
+        self._save_task  = None
+
+    def state_path(self) -> Path:
+        return resolve(self.path).with_suffix(".md.yjs")
+
+    def load(self):
+        """Load persisted updates from disk."""
+        p = self.state_path()
+        if not p.exists():
+            return
+        data = p.read_bytes()
+        pos  = 0
+        while pos + 4 <= len(data):
+            length = struct.unpack_from(">I", data, pos)[0]
+            pos   += 4
+            if pos + length > len(data):
+                log.warning("truncated state file %s, stopping at %d", p, pos)
+                break
+            self.updates.append(data[pos : pos + length])
+            pos += length
+        log.info("loaded %s (%d updates)", p, len(self.updates))
+
+    def save(self):
+        """Persist updates to disk as length-prefixed records."""
+        if not self.updates:
+            return
+        p = self.state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("wb") as f:
+            for msg in self.updates:
+                f.write(struct.pack(">I", len(msg)))
+                f.write(msg)
+        log.info("saved %s (%d updates, %d bytes)", p, len(self.updates),
+                 sum(len(m) for m in self.updates))
+
+    def schedule_save(self, delay: int = 30):
+        """Debounced save — resets the timer on each call."""
+        if self._save_task:
+            self._save_task.cancel()
+        self._save_task = asyncio.create_task(self._delayed_save(delay))
+
+    async def _delayed_save(self, delay: int):
+        await asyncio.sleep(delay)
+        self.save()
+
+    def add_update(self, data: bytes):
+        """Store a raw message received from a client."""
+        self.updates.append(data)
+
+
+_rooms: dict[str, Room] = {}
+
+# ─── App ─────────────────────────────────────────────────────────────────────
 
 app = FastAPI()
 
-# Static file directory for production build
-STATIC_DIR = Path("./static") if Path("./static").exists() else Path("../frontend/dist")
+STATIC_DIR           = Path("./static") if Path("./static").exists() else Path("../frontend/dist")
 STATIC_DIR_AVAILABLE = STATIC_DIR.exists()
 
-# Mount static files at /assets (this takes precedence over catch-all routes)
 if STATIC_DIR_AVAILABLE and (STATIC_DIR / "assets").exists():
-    app.mount(
-        "/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets"
-    )
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
 
 
 def resolve(relative: str) -> Path:
@@ -48,25 +115,29 @@ def resolve(relative: str) -> Path:
 def meta(path: Path) -> dict:
     stat = path.stat()
     return {
-        "path": str(path.relative_to(BASE_DIR)),
-        "created": stat.st_ctime,
+        "path":     str(path.relative_to(BASE_DIR)),
+        "created":  stat.st_ctime,
         "modified": stat.st_mtime,
-        "size": stat.st_size,
+        "size":     stat.st_size,
     }
 
 
-async def broadcast(room: str, data: bytes, exclude: WebSocket) -> None:
-    for ws in list(_rooms.get(room, set())):
+async def broadcast(room: Room, data: bytes, exclude: WebSocket) -> None:
+    for ws in list(room.peers):
         if ws is not exclude:
             try:
                 await ws.send_bytes(data)
             except Exception:
-                _rooms[room].discard(ws)
+                room.peers.discard(ws)
 
 
 @app.get("/api/files")
 def list_files():
-    return [meta(file) for file in BASE_DIR.rglob("*") if file.is_file()]
+    # Exclude .yjs state files — those are internal
+    return [
+        meta(f) for f in BASE_DIR.rglob("*")
+        if f.is_file() and f.suffix != ".yjs"
+    ]
 
 
 @app.get("/api/files/{path:path}")
@@ -101,38 +172,60 @@ def delete_file(path: str):
     if not fp.is_file():
         raise HTTPException(404, "File not found")
     fp.unlink()
-
+    # Clean up state file too
+    yjs = fp.with_suffix(".md.yjs")
+    if yjs.exists():
+        yjs.unlink()
 
 @app.websocket("/ws/files/{path:path}")
 async def relay(ws: WebSocket, path: str):
-    resolve(path)
+    resolve(path)  # validate — raises 400 on bad path
     await ws.accept()
-    _rooms.setdefault(path, set()).add(ws)
-    log.info("connect %s peers=%d", path, len(_rooms.get(path, set())))
+
+    if path not in _rooms:
+        room = Room(path)
+        room.load()
+        _rooms[path] = room
+    else:
+        room = _rooms[path]
+
+    room.peers.add(ws)
+    log.info("connect %s peers=%d", path, len(room.peers))
+
+    # Replay all stored updates to the new peer so it gets full server state
+    for msg in room.updates:
+        try:
+            await ws.send_bytes(msg)
+        except Exception:
+            break
+
     try:
         while True:
-            await broadcast(path, await ws.receive_bytes(), exclude=ws)
+            data = await ws.receive_bytes()
+            room.add_update(data)
+            room.schedule_save()
+            await broadcast(room, data, exclude=ws)
     except WebSocketDisconnect:
         pass
     finally:
-        _rooms[path].discard(ws)
-        if not _rooms[path]:
+        room.peers.discard(ws)
+        log.info("disconnect %s peers=%d", path, len(room.peers))
+
+        if not room.peers:
+            # Last peer — save immediately and free memory
+            if room._save_task:
+                room._save_task.cancel()
+            room.save()
             del _rooms[path]
-        log.info("disconnect %s peers=%d", path, len(_rooms.get(path, set())))
 
 
 @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
 def spa(path: str):
-    """Serve static files if they exist, otherwise serve index.html for SPA."""
     if not STATIC_DIR_AVAILABLE:
         raise HTTPException(503, "Frontend not built")
-
-    # Try to serve the file directly if it exists (e.g., leaf.svg)
     file_path = STATIC_DIR / path
     if file_path.exists() and file_path.is_file():
         return FileResponse(file_path)
-
-    # Fall back to index.html for SPA routing
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(503, "Frontend not built")
